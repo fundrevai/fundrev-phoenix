@@ -25,6 +25,7 @@ ARG BASE_IMAGE=gcr.io/distroless/python3-debian12:nonroot
 
 # This Dockerfile is a multi-stage build. The first stage builds the frontend.
 FROM node:22-slim AS frontend-builder
+ENV NODE_OPTIONS=--max_old_space_size=8192
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 WORKDIR /phoenix/app/
@@ -36,7 +37,7 @@ RUN pnpm install
 RUN pnpm run build
 
 # The second stage builds the backend.
-FROM python:3.11-bullseye as backend-builder
+FROM python:3.11-bullseye AS backend-builder
 WORKDIR /phoenix
 COPY ./src /phoenix/src
 COPY ./pyproject.toml /phoenix/
@@ -63,7 +64,7 @@ RUN pip install --target ./env ".[container, pg]"
 FROM ${BASE_IMAGE}
 WORKDIR /phoenix
 COPY --from=backend-builder /phoenix/env/ ./env
-ENV PYTHONPATH="/phoenix/env:$PYTHONPATH"
+ENV PYTHONPATH="/Users/parthparmar/anaconda3/envs/fundrev-phoenix/bin/python"
 ENV PYTHONUNBUFFERED=1
 # Expose the Phoenix port.
 EXPOSE 6006
