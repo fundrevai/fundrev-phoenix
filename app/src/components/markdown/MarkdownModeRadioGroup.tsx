@@ -3,7 +3,13 @@ import { ToggleButton, ToggleButtonGroup } from "@phoenix/components";
 import { useMarkdownMode } from "./MarkdownDisplayContext";
 import { MarkdownDisplayMode } from "./types";
 
-const markdownDisplayModes: MarkdownDisplayMode[] = ["text", "markdown"];
+const markdownDisplayModes: MarkdownDisplayMode[] = [
+  "text",
+  "markdown",
+  "html",
+  "table",
+  "plot",
+];
 
 /**
  * TypeGuard for the markdown mode
@@ -44,6 +50,15 @@ export function MarkdownModeRadioGroup({
       </ToggleButton>
       <ToggleButton aria-label="markdown" id="markdown">
         Markdown
+      </ToggleButton>
+      <ToggleButton aria-label="html" id="html">
+        HTML
+      </ToggleButton>
+      <ToggleButton aria-label="table" id="table">
+        Table
+      </ToggleButton>
+      <ToggleButton aria-label="plot" id="plot">
+        Plot
       </ToggleButton>
     </ToggleButtonGroup>
   );
