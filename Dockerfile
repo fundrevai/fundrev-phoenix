@@ -64,7 +64,7 @@ RUN pip install --target ./env ".[container, pg]"
 FROM ${BASE_IMAGE}
 WORKDIR /phoenix
 COPY --from=backend-builder /phoenix/env/ ./env
-ENV PYTHONPATH="/Users/parthparmar/anaconda3/envs/fundrev-phoenix/bin/python"
+ENV PYTHONPATH=/phoenix/env:$PYTHONPATH
 ENV PYTHONUNBUFFERED=1
 # Expose the Phoenix port.
 EXPOSE 6006
