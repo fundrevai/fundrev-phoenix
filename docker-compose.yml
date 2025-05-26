@@ -9,13 +9,13 @@ services:
       - 6006:6006
       - 4317:4317
     environment:
-      - PHOENIX_SQL_DATABASE_URL=postgresql://postgres:postgres@db:5432/postgres
+      - PHOENIX_SQL_DATABASE_URL=postgresql://fundrev-phoenix-postgressql.postgres.database.azure.com:5432/postgres?user=fundrevpostgresadmin&password=!KnSEvsoeuU&sslmode=require
   db:
     image: postgres:16
     restart: always
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_USER=fundrevpostgresadmin
+      - POSTGRES_PASSWORD=!KnSEvsoeuU
       - POSTGRES_DB=postgres
     ports:
       - 5432
