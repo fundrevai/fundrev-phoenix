@@ -14,12 +14,14 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/Arize-ai/phoenix/blob/main/js/packages/phoenix-mcp/LICENSE)
 <img src="https://badge.mcpx.dev?status=on" title="MCP Enabled"/>
+<a href="https://cursor.com/install-mcp?name=phoenix&config=eyJjb21tYW5kIjoibnB4IC15IEBhcml6ZWFpL3Bob2VuaXgtbWNwQGxhdGVzdCAtLWJhc2VVcmwgaHR0cDovL2xvY2FsaG9zdDo2MDA2IC0tYXBpS2V5IHlvdXItYXBpLWtleSJ9"><img src="https://cursor.com/deeplink/mcp-install-dark.svg" alt="Add Arize Phoenix MCP server to Cursor" height=20 /></a>
 
 Phoenix MCP Server is an implementation of the Model Context Protocol for the Arize Phoenix platform. It provides a unified interface to Phoenix's capabilites.
 
 You can use Phoenix MCP Server for:
 
 - **Projects Management**: List and explore projects that organize your observability data
+- **Spans & Annotations**: Retrieve spans and their annotations for analysis and debugging
 - **Prompts Management**: Create, list, update, and iterate on prompts
 - **Datasets**: Explore datasets, and syntesize new examples
 - **Experiments**: Pull experiment results and visualize them with the help of an LLM
@@ -45,6 +47,7 @@ This MCP server can be used using `npx` and can be directly integrated with clie
       ]
     }
   }
+}
 ```
 
 ## Development

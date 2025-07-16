@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import operator
-from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Optional
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, Optional, cast
 
 import strawberry
 from aioitertools.itertools import islice
@@ -16,18 +16,21 @@ from strawberry.relay import Connection, Node, NodeID
 from strawberry.types import Info
 from typing_extensions import assert_never
 
-from phoenix.datetime_utils import right_open_time_range
+from phoenix.datetime_utils import get_timestamp_range, normalize_datetime, right_open_time_range
 from phoenix.db import models
-from phoenix.db.helpers import SupportedSQLDialect
+from phoenix.db.helpers import SupportedSQLDialect, date_trunc
 from phoenix.server.api.context import Context
+from phoenix.server.api.exceptions import BadRequest
 from phoenix.server.api.input_types.ProjectSessionSort import (
     ProjectSessionColumn,
     ProjectSessionSort,
 )
 from phoenix.server.api.input_types.SpanSort import SpanSort, SpanSortConfig
+from phoenix.server.api.input_types.TimeBinConfig import TimeBinConfig, TimeBinScale
 from phoenix.server.api.input_types.TimeRange import TimeRange
 from phoenix.server.api.types.AnnotationConfig import AnnotationConfig, to_gql_annotation_config
 from phoenix.server.api.types.AnnotationSummary import AnnotationSummary
+from phoenix.server.api.types.CostBreakdown import CostBreakdown
 from phoenix.server.api.types.DocumentEvaluationSummary import DocumentEvaluationSummary
 from phoenix.server.api.types.pagination import (
     ConnectionArgs,
@@ -40,6 +43,7 @@ from phoenix.server.api.types.pagination import (
 from phoenix.server.api.types.ProjectSession import ProjectSession, to_gql_project_session
 from phoenix.server.api.types.SortDir import SortDir
 from phoenix.server.api.types.Span import Span
+from phoenix.server.api.types.SpanCostSummary import SpanCostSummary
 from phoenix.server.api.types.TimeSeries import TimeSeries, TimeSeriesDataPoint
 from phoenix.server.api.types.Trace import Trace
 from phoenix.server.api.types.ValidationResult import ValidationResult
@@ -176,6 +180,30 @@ class Project(Node):
         )
 
     @strawberry.field
+    async def cost_summary(
+        self,
+        info: Info[Context, None],
+        time_range: Optional[TimeRange] = UNSET,
+        filter_condition: Optional[str] = UNSET,
+    ) -> SpanCostSummary:
+        loader = info.context.data_loaders.span_cost_summary_by_project
+        summary = await loader.load((self.project_rowid, time_range, filter_condition))
+        return SpanCostSummary(
+            prompt=CostBreakdown(
+                tokens=summary.prompt.tokens,
+                cost=summary.prompt.cost,
+            ),
+            completion=CostBreakdown(
+                tokens=summary.completion.tokens,
+                cost=summary.completion.cost,
+            ),
+            total=CostBreakdown(
+                tokens=summary.total.tokens,
+                cost=summary.total.cost,
+            ),
+        )
+
+    @strawberry.field
     async def latency_ms_quantile(
         self,
         info: Info[Context, None],
@@ -238,6 +266,7 @@ class Project(Node):
     ) -> Connection[Span]:
         stmt = (
             select(models.Span.id)
+            .select_from(models.Span)
             .join(models.Trace)
             .where(models.Trace.project_rowid == self.project_rowid)
         )
@@ -408,6 +437,21 @@ class Project(Node):
                     ).subquery()
                 else:
                     assert_never(sort.col)
+                key = sort_subq.c.key
+                stmt = stmt.join(sort_subq, table.id == sort_subq.c.id)
+            elif sort.col is ProjectSessionColumn.costTotal:
+                sort_subq = (
+                    select(
+                        models.Trace.project_session_rowid.label("id"),
+                        func.sum(models.SpanCost.total_cost).label("key"),
+                    )
+                    .join_from(
+                        models.Trace,
+                        models.SpanCost,
+                        models.Trace.id == models.SpanCost.trace_rowid,
+                    )
+                    .group_by(models.Trace.project_session_rowid)
+                ).subquery()
                 key = sort_subq.c.key
                 stmt = stmt.join(sort_subq, table.id == sort_subq.c.id)
             else:
@@ -613,18 +657,9 @@ class Project(Node):
             last=last,
             before=before if isinstance(before, CursorString) else None,
         )
-        async with info.context.db() as session:
-            annotation_configs = await session.stream_scalars(
-                select(models.AnnotationConfig)
-                .join(
-                    models.ProjectAnnotationConfig,
-                    models.AnnotationConfig.id
-                    == models.ProjectAnnotationConfig.annotation_config_id,
-                )
-                .where(models.ProjectAnnotationConfig.project_id == self.project_rowid)
-                .order_by(models.AnnotationConfig.name)
-            )
-            data = [to_gql_annotation_config(config) async for config in annotation_configs]
+        loader = info.context.data_loaders.annotation_configs_by_project
+        configs = await loader.load(self.project_rowid)
+        data = [to_gql_annotation_config(config) for config in configs]
         return connection_from_list(data=data, args=args)
 
     @strawberry.field
@@ -665,88 +700,144 @@ class Project(Node):
             )
         return updated_at
 
-    @strawberry.field(
-        description="Hourly span count for the project.",
-    )  # type: ignore
+    @strawberry.field
     async def span_count_time_series(
         self,
         info: Info[Context, None],
-        time_range: Optional[TimeRange] = UNSET,
+        time_range: TimeRange,
+        time_bin_config: Optional[TimeBinConfig] = UNSET,
     ) -> SpanCountTimeSeries:
-        """Returns a time series of span counts grouped by hour for the project.
+        if time_range.start is None:
+            raise BadRequest("Start time is required")
 
-        This field provides hourly aggregated span counts, which can be useful for
-        visualizing span activity over time. The data points represent the number
-        of spans that started in each hour.
-
-        Args:
-            info: The GraphQL info object containing context information.
-            time_range: Optional time range to filter the spans. If provided, only
-                spans that started within this range will be counted.
-
-        Returns:
-            A SpanCountTimeSeries object containing data points with timestamps
-            (rounded to the nearest hour) and corresponding span counts.
-
-        Notes:
-            - The timestamps are rounded down to the nearest hour.
-            - If a time range is provided, the start time is rounded down to the
-              nearest hour, and the end time is rounded up to the nearest hour.
-            - The SQL query is optimized for both PostgreSQL and SQLite databases.
-        """
-        # Determine the appropriate SQL function to truncate timestamps to hours
-        # based on the database dialect
-        if info.context.db.dialect is SupportedSQLDialect.POSTGRESQL:
-            # PostgreSQL uses date_trunc for timestamp truncation
-            hour = func.date_trunc("hour", models.Span.start_time)
-        elif info.context.db.dialect is SupportedSQLDialect.SQLITE:
-            # SQLite uses strftime for timestamp formatting
-            hour = func.strftime("%Y-%m-%dT%H:00:00.000+00:00", models.Span.start_time)
-        else:
-            assert_never(info.context.db.dialect)
-
-        # Build the base query to count spans grouped by hour
+        dialect = info.context.db.dialect
+        utc_offset_minutes = 0
+        field: Literal["minute", "hour", "day", "week", "month", "year"] = "hour"
+        if time_bin_config:
+            utc_offset_minutes = time_bin_config.utc_offset_minutes
+            if time_bin_config.scale is TimeBinScale.MINUTE:
+                field = "minute"
+            elif time_bin_config.scale is TimeBinScale.HOUR:
+                field = "hour"
+            elif time_bin_config.scale is TimeBinScale.DAY:
+                field = "day"
+            elif time_bin_config.scale is TimeBinScale.WEEK:
+                field = "week"
+            elif time_bin_config.scale is TimeBinScale.MONTH:
+                field = "month"
+            elif time_bin_config.scale is TimeBinScale.YEAR:
+                field = "year"
+        bucket = date_trunc(dialect, field, models.Span.start_time, utc_offset_minutes)
         stmt = (
-            select(hour, func.count())
-            .join(models.Trace)
+            select(bucket, func.count(models.Span.id))
+            .join_from(models.Span, models.Trace)
             .where(models.Trace.project_rowid == self.project_rowid)
-            .group_by(hour)
-            .order_by(hour)
+            .group_by(bucket)
+            .order_by(bucket)
         )
+        if time_range.start:
+            stmt = stmt.where(time_range.start <= models.Span.start_time)
+        if time_range.end:
+            stmt = stmt.where(models.Span.start_time < time_range.end)
 
-        # Apply time range filtering if provided
-        if time_range:
-            if t := time_range.start:
-                # Round down to nearest hour for the start time
-                start = t.replace(minute=0, second=0, microsecond=0)
-                stmt = stmt.where(start <= models.Span.start_time)
-            if t := time_range.end:
-                # Round up to nearest hour for the end time
-                # If the time is already at the start of an hour, use it as is
-                if t.minute == 0 and t.second == 0 and t.microsecond == 0:
-                    end = t
-                else:
-                    # Otherwise, round up to the next hour
-                    end = t.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-                stmt = stmt.where(models.Span.start_time < end)
-
-        # Execute the query and convert the results to a time series
+        data = {}
         async with info.context.db() as session:
-            data = await session.stream(stmt)
-            return SpanCountTimeSeries(
-                data=[
-                    TimeSeriesDataPoint(
-                        timestamp=_as_datetime(t),
-                        value=v,
-                    )
-                    async for t, v in data
-                ]
-            )
+            async for t, v in await session.stream(stmt):
+                timestamp = _as_datetime(t)
+                data[timestamp] = TimeSeriesDataPoint(timestamp=timestamp, value=v)
+
+        data_timestamps: list[datetime] = [data_point.timestamp for data_point in data.values()]
+        min_time = min([*data_timestamps, time_range.start])
+        max_time = max(
+            [
+                *data_timestamps,
+                *([time_range.end] if time_range.end else []),
+            ],
+            default=datetime.now(timezone.utc),
+        )
+        for timestamp in get_timestamp_range(
+            start_time=min_time,
+            end_time=max_time,
+            stride=field,
+            utc_offset_minutes=utc_offset_minutes,
+        ):
+            if timestamp not in data:
+                data[timestamp] = TimeSeriesDataPoint(timestamp=timestamp)
+        return SpanCountTimeSeries(data=sorted(data.values(), key=lambda x: x.timestamp))
+
+    @strawberry.field
+    async def trace_count_time_series(
+        self,
+        info: Info[Context, None],
+        time_range: TimeRange,
+        time_bin_config: Optional[TimeBinConfig] = UNSET,
+    ) -> TraceCountTimeSeries:
+        if time_range.start is None:
+            raise BadRequest("Start time is required")
+
+        dialect = info.context.db.dialect
+        utc_offset_minutes = 0
+        field: Literal["minute", "hour", "day", "week", "month", "year"] = "hour"
+        if time_bin_config:
+            utc_offset_minutes = time_bin_config.utc_offset_minutes
+            if time_bin_config.scale is TimeBinScale.MINUTE:
+                field = "minute"
+            elif time_bin_config.scale is TimeBinScale.HOUR:
+                field = "hour"
+            elif time_bin_config.scale is TimeBinScale.DAY:
+                field = "day"
+            elif time_bin_config.scale is TimeBinScale.WEEK:
+                field = "week"
+            elif time_bin_config.scale is TimeBinScale.MONTH:
+                field = "month"
+            elif time_bin_config.scale is TimeBinScale.YEAR:
+                field = "year"
+        bucket = date_trunc(dialect, field, models.Trace.start_time, utc_offset_minutes)
+        stmt = (
+            select(bucket, func.count(models.Trace.id))
+            .where(models.Trace.project_rowid == self.project_rowid)
+            .group_by(bucket)
+            .order_by(bucket)
+        )
+        if time_range:
+            if time_range.start:
+                stmt = stmt.where(time_range.start <= models.Trace.start_time)
+            if time_range.end:
+                stmt = stmt.where(models.Trace.start_time < time_range.end)
+        data = {}
+        async with info.context.db() as session:
+            async for t, v in await session.stream(stmt):
+                timestamp = _as_datetime(t)
+                data[timestamp] = TimeSeriesDataPoint(timestamp=timestamp, value=v)
+
+        data_timestamps: list[datetime] = [data_point.timestamp for data_point in data.values()]
+        min_time = min([*data_timestamps, time_range.start])
+        max_time = max(
+            [
+                *data_timestamps,
+                *([time_range.end] if time_range.end else []),
+            ],
+            default=datetime.now(timezone.utc),
+        )
+        for timestamp in get_timestamp_range(
+            start_time=min_time,
+            end_time=max_time,
+            stride=field,
+            utc_offset_minutes=utc_offset_minutes,
+        ):
+            if timestamp not in data:
+                data[timestamp] = TimeSeriesDataPoint(timestamp=timestamp)
+        return TraceCountTimeSeries(data=sorted(data.values(), key=lambda x: x.timestamp))
 
 
 @strawberry.type
 class SpanCountTimeSeries(TimeSeries):
     """A time series of span count"""
+
+
+@strawberry.type
+class TraceCountTimeSeries(TimeSeries):
+    """A time series of trace count"""
 
 
 INPUT_VALUE = SpanAttributes.INPUT_VALUE.split(".")
@@ -757,5 +848,5 @@ def _as_datetime(value: Any) -> datetime:
     if isinstance(value, datetime):
         return value
     if isinstance(value, str):
-        return datetime.fromisoformat(value)
+        return cast(datetime, normalize_datetime(datetime.fromisoformat(value), timezone.utc))
     raise ValueError(f"Cannot convert {value} to datetime")

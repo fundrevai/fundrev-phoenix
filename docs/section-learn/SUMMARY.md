@@ -16,15 +16,24 @@
   * [LangGraph](agents/agent-workflow-patterns/langgraph.md)
   * [Smolagents](agents/agent-workflow-patterns/smolagents.md)
 
+***
+
+* [Evaluating Multi-Agent Systems](evaluating-multi-agent-systems.md)
+
 ## 🔭 Tracing
 
 * [What are Traces](tracing/what-are-traces.md)
 * [How Tracing Works](tracing/how-tracing-works.md)
+* [Annotations Concepts](tracing/annotations-concepts.md)
 * [FAQs: Tracing](tracing/faqs-tracing.md)
 
 ## 📃 Prompt Engineering
 
 * [Prompts Concepts](prompt-engineering/prompts-concepts.md)
+
+## 🧩 Context Engineering
+
+* [Context Engineering Concepts](context-engineering/context-engineering-concepts.md)
 
 ## 🗄️ Datasets and Experiments
 
@@ -55,6 +64,7 @@
   * [What is my Phoenix Endpoint?](resources/faqs/what-is-my-phoenix-endpoint.md)
   * [What is LlamaTrace vs Phoenix Cloud?](resources/faqs/what-is-llamatrace-vs-phoenix-cloud.md)
   * [Will Phoenix Cloud be on the latest version of Phoenix?](resources/faqs/will-phoenix-cloud-be-on-the-latest-version-of-phoenix.md)
+  * [Phoenix Cloud Migration Guide: Legacy to New Version](resources/faqs/phoenix-cloud-migration-guide-legacy-to-new-version.md)
   * [Can I add other users to my Phoenix Instance?](resources/faqs/can-i-add-other-users-to-my-phoenix-instance.md)
   * [Can I use Azure OpenAI?](resources/faqs/can-i-use-azure-openai.md)
   * [Can I use Phoenix locally from a remote Jupyter instance?](resources/faqs/can-i-use-phoenix-locally-from-a-remote-jupyter-instance.md)
@@ -65,7 +75,8 @@
   * [Can I use gRPC for trace collection?](resources/faqs/can-i-use-grpc-for-trace-collection.md)
   * [How do I resolve Phoenix Evals showing NOT\_PARSABLE?](resources/faqs/how-do-i-resolve-phoenix-evals-showing-not_parsable.md)
   * [Langfuse alternative? Arize Phoenix vs Langfuse: key differences](resources/faqs/langfuse-alternatives.md)
-  * [Langsmith alternatives? Arize Phoenix vs LangSmith: key differences](resources/faqs/langsmith-alternatives.md)
+  * [Open Source LangSmith Alternative: Arize Phoenix vs. LangSmith](resources/faqs/langsmith-alternatives.md)
+  * [Braintrust Open Source Alternative? LLM Evaluation Platform Comparison](resources/faqs/braintrust-open-source-alternative-llm-evaluation-platform-comparison.md)
 * [Contribute to Phoenix](resources/contribute-to-phoenix.md)
 * [Github](https://github.com/Arize-ai/phoenix)
 
