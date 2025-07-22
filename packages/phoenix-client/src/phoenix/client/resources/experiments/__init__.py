@@ -42,7 +42,6 @@ from .types import (
     EvaluationResult,
     Evaluator,
     EvaluatorName,
-    Evaluators,
     Experiment,
     ExperimentEvaluationRun,
     ExperimentEvaluators,
@@ -329,13 +328,11 @@ class Experiments:
     An `evaluator` is either a synchronous or asynchronous function that returns an evaluation
     result object, which can take any of the following forms:
 
-    - phoenix.experiments.types.EvaluationResult with optional fields for score, label,
-      explanation and metadata
+    - an EvaluationResult dict with optional fields for score, label, explanation and metadata
     - a `bool`, which will be interpreted as a score of 0 or 1 plus a label of "True" or "False"
     - a `float`, which will be interpreted as a score
     - a `str`, which will be interpreted as a label
     - a 2-`tuple` of (`float`, `str`), which will be interpreted as (score, explanation)
-    - a dictionary with any of: "label", "score" and "explanation" keys
 
     If the `evaluator` is a function of one argument then that argument will be
     bound to the `output` of the task. Alternatively, the `evaluator` can be a function of any
@@ -421,10 +418,10 @@ class Experiments:
         behavior of the task. The experiment and evaluation results are stored in the Phoenix
         database for comparison and analysis.
 
-        A `task` is either a synchronous function that returns a JSON serializable
-        output. If the `task` is a function of one argument then that argument will be bound to the
-        `input` field of the dataset example. Alternatively, the `task` can be a function of any
-        combination of specific argument names that will be bound to special values:
+        A `task` is a synchronous function that returns a JSON serializable output. If the `task`
+        is a function of one argument then that argument will be bound to the `input` field of the
+        dataset example. Alternatively, the `task` can be a function of any combination of specific
+        argument names that will be bound to special values:
 
         - `input`: The input field of the dataset example
         - `expected`: The expected or reference output of the dataset example
@@ -435,13 +432,11 @@ class Experiments:
         An `evaluator` is either a synchronous function that returns an evaluation
         result object, which can take any of the following forms:
 
-        - phoenix.experiments.types.EvaluationResult with optional fields for score, label,
-          explanation and metadata
+        - an EvaluationResult dict with optional fields for score, label, explanation and metadata
         - a `bool`, which will be interpreted as a score of 0 or 1 plus a label of "True" or "False"
         - a `float`, which will be interpreted as a score
         - a `str`, which will be interpreted as a label
         - a 2-`tuple` of (`float`, `str`), which will be interpreted as (score, explanation)
-        - a dictionary with any of: "label", "score" and "explanation" keys
 
         If the `evaluator` is a function of one argument then that argument will be
         bound to the `output` of the task. Alternatively, the `evaluator` can be a function of any
@@ -611,7 +606,7 @@ class Experiments:
             for run in all_runs:
                 run["start_time"] = datetime.fromisoformat(run["start_time"])
                 run["end_time"] = datetime.fromisoformat(run["end_time"])
-                task_runs_from_db.append(run)  # Already in TypedDict format
+                task_runs_from_db.append(run)
             task_runs = task_runs_from_db
 
             # Check if we got all expected runs
@@ -630,6 +625,7 @@ class Experiments:
         ran_experiment: RanExperiment = {
             "experiment_id": experiment["id"],
             "dataset_id": dataset.id,
+            "dataset_version_id": dataset.version_id,
             "task_runs": task_runs_list,
             "evaluation_runs": [],
             "experiment_metadata": experiment.get("metadata", {}),
@@ -656,6 +652,128 @@ class Experiments:
 
         return ran_experiment
 
+    def get_experiment(self, *, experiment_id: str) -> RanExperiment:
+        """
+        Get a completed experiment by ID.
+
+        This method retrieves a completed experiment with all its task runs and evaluation runs,
+        returning a RanExperiment object that can be used with evaluate_experiment to run
+        additional evaluations.
+
+        Args:
+            experiment_id: The ID of the experiment to retrieve.
+
+        Returns:
+            A RanExperiment object containing the experiment data, task runs, and evaluation runs.
+
+        Raises:
+            ValueError: If the experiment is not found.
+            httpx.HTTPStatusError: If the API returns an error response.
+
+        Example:
+            >>> client = Client()
+            >>> experiment = client.experiments.get_experiment(experiment_id="123")
+            >>> client.experiments.evaluate_experiment(
+            ...     experiment=experiment,
+            ...     evaluators=[
+            ...         correctness,
+            ...     ],
+            ...     print_summary=True,
+            ... )
+        """
+        # Get experiment metadata using existing endpoint
+        try:
+            experiment_response = self._client.get(f"v1/experiments/{experiment_id}")
+            experiment_response.raise_for_status()
+            experiment_data = experiment_response.json()["data"]
+        except HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise ValueError(f"Experiment not found: {experiment_id}")
+            raise
+
+        try:
+            runs_response = self._client.get(f"v1/experiments/{experiment_id}/runs")
+            runs_response.raise_for_status()
+            runs_data = runs_response.json()["data"]
+        except HTTPStatusError as e:
+            if e.response.status_code == 404:
+                # Experiment exists but has no runs
+                runs_data = []
+            else:
+                raise
+
+        try:
+            json_response = self._client.get(f"v1/experiments/{experiment_id}/json")
+            json_response.raise_for_status()
+            json_data = json_response.json()
+        except HTTPStatusError as e:
+            if e.response.status_code == 404:
+                # Experiment exists but has no runs
+                json_data = []
+            else:
+                raise
+
+        json_lookup = {}
+        for record in json_data:  # pyright: ignore [reportUnknownVariableType]
+            key = (record["example_id"], record["repetition_number"])  # pyright: ignore [reportUnknownMemberType, reportUnknownVariableType]
+            json_lookup[key] = record
+
+        task_runs: list[ExperimentRun] = []
+        evaluation_runs: list[ExperimentEvaluationRun] = []
+
+        for run_data in runs_data:  # pyright: ignore [reportUnknownVariableType]
+            task_run: ExperimentRun = cast(ExperimentRun, run_data)  # pyright: ignore [reportUnknownArgumentType]
+            task_runs.append(task_run)
+
+            lookup_key = (run_data["dataset_example_id"], run_data["repetition_number"])  # pyright: ignore [reportUnknownMemberType, reportUnknownVariableType]
+            json_record = json_lookup.get(lookup_key)  # pyright: ignore [reportUnknownVariableType, reportUnknownMemberType]
+            if not json_record:
+                continue
+
+            # Create evaluation runs from annotations if present
+            for annotation in json_record.get("annotations", []):  # pyright: ignore [reportUnknownMemberType, reportUnknownVariableType]
+                eval_result = None
+                if (
+                    annotation.get("label") is not None  # pyright: ignore [reportUnknownMemberType]
+                    or annotation.get("score") is not None  # pyright: ignore [reportUnknownMemberType]
+                    or annotation.get("explanation") is not None  # pyright: ignore [reportUnknownMemberType]
+                ):
+                    eval_result = cast(
+                        EvaluationResult,
+                        {  # pyright: ignore [reportUnknownVariableType]
+                            "label": annotation.get("label"),  # pyright: ignore [reportUnknownMemberType]
+                            "score": annotation.get("score"),  # pyright: ignore [reportUnknownMemberType]
+                            "explanation": annotation.get("explanation"),  # pyright: ignore [reportUnknownMemberType]
+                        },
+                    )
+
+                # Only create evaluation runs for annotations that have evaluation data
+                if eval_result is not None:
+                    eval_run = ExperimentEvaluationRun(
+                        id=f"ExperimentEvaluation:{len(evaluation_runs) + 1}",  # Generate temp ID
+                        experiment_run_id=run_data["id"],  # pyright: ignore [reportUnknownArgumentType]
+                        start_time=datetime.fromisoformat(annotation["start_time"]),  # pyright: ignore [reportUnknownArgumentType]
+                        end_time=datetime.fromisoformat(annotation["end_time"]),  # pyright: ignore [reportUnknownArgumentType]
+                        name=annotation["name"],  # pyright: ignore [reportUnknownArgumentType]
+                        annotator_kind=annotation["annotator_kind"],  # pyright: ignore [reportUnknownArgumentType]
+                        error=annotation.get("error"),  # pyright: ignore [reportUnknownMemberType, reportUnknownArgumentType]
+                        result=eval_result,  # pyright: ignore [reportArgumentType]
+                        trace_id=annotation.get("trace_id"),  # pyright: ignore [reportUnknownMemberType, reportUnknownArgumentType]
+                        metadata=annotation.get("metadata", {}),  # pyright: ignore [reportUnknownMemberType, reportUnknownArgumentType]
+                    )
+                    evaluation_runs.append(eval_run)
+
+        ran_experiment: RanExperiment = {
+            "experiment_id": experiment_id,
+            "dataset_id": experiment_data["dataset_id"],
+            "dataset_version_id": experiment_data.get("dataset_version_id"),
+            "task_runs": task_runs,
+            "evaluation_runs": evaluation_runs,
+            "experiment_metadata": experiment_data.get("metadata", {}),
+        }
+
+        return ran_experiment
+
     def evaluate_experiment(
         self,
         *,
@@ -669,16 +787,14 @@ class Experiments:
         """
         Run evaluators on a completed experiment.
 
-        An `evaluator` is either a synchronous or asynchronous function that returns an evaluation
+        An `evaluator` is a synchronous function that returns an evaluation
         result object, which can take any of the following forms:
 
-        - phoenix.experiments.types.EvaluationResult with optional fields for score, label,
-          explanation and metadata
+        - an EvaluationResult dict with optional fields for score, label, explanation and metadata
         - a `bool`, which will be interpreted as a score of 0 or 1 plus a label of "True" or "False"
         - a `float`, which will be interpreted as a score
         - a `str`, which will be interpreted as a label
         - a 2-`tuple` of (`float`, `str`), which will be interpreted as (score, explanation)
-        - a dictionary with any of: "label", "score" and "explanation" keys
 
         Args:
             experiment: The experiment to evaluate, returned from `run_experiment`.
@@ -704,47 +820,57 @@ class Experiments:
         experiment_id = experiment["experiment_id"]
         task_runs = experiment["task_runs"]
         dataset_id = experiment["dataset_id"]
+        dataset_version_id = experiment.get("dataset_version_id")
         experiment_metadata = experiment["experiment_metadata"]
-        try:
-            experiment_response = self._client.get(
-                f"v1/experiments/{experiment_id}", timeout=timeout
-            )
-            experiment_response.raise_for_status()
-            experiment_data = experiment_response.json()["data"]
-            dataset_version_id = experiment_data["dataset_version_id"]
-        except HTTPStatusError as e:
-            if e.response.status_code == 404:
-                raise ValueError(f"Experiment not found: {experiment_id}")
-            raise
 
-        # Fetch dataset for evaluation context
+        if experiment_id == DRY_RUN:
+            dry_run = True
+
+        if dry_run:
+            project_name = ""
+        else:
+            try:
+                experiment_response = self._client.get(
+                    f"v1/experiments/{experiment_id}", timeout=timeout
+                )
+                experiment_response.raise_for_status()
+                experiment_data = experiment_response.json()["data"]
+                project_name = experiment_data.get("project_name", "")
+            except HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    raise ValueError(f"Experiment not found: {experiment_id}")
+                raise
+
+        version_params = (
+            {"version_id": str(dataset_version_id)} if dataset_version_id is not None else {}
+        )
+
         try:
-            dataset_response = self._client.get(
-                f"v1/datasets/{dataset_id}/examples",
-                params={"version_id": str(dataset_version_id)},
+            dataset_info_response = self._client.get(
+                f"v1/datasets/{dataset_id}",
+                params=version_params,
                 timeout=timeout,
             )
-            dataset_response.raise_for_status()
-            dataset_data = dataset_response.json()["data"]
+            dataset_info_response.raise_for_status()
+            dataset_info = dataset_info_response.json()["data"]
+
+            dataset_examples_response = self._client.get(
+                f"v1/datasets/{dataset_id}/examples",
+                params=version_params,
+                timeout=timeout,
+            )
+            dataset_examples_response.raise_for_status()
+            dataset_data = dataset_examples_response.json()["data"]
         except HTTPStatusError:
             raise ValueError(f"Failed to fetch dataset for experiment: {experiment_id}")
 
         from phoenix.client.resources.datasets import Dataset
 
         dataset = Dataset(
-            dataset_info={
-                "id": dataset_id,
-                "name": experiment_data.get("dataset_name", ""),
-                "description": experiment_data.get("dataset_description"),
-                "metadata": experiment_data.get("dataset_metadata", {}),
-                "created_at": experiment_data.get("dataset_created_at"),
-                "updated_at": experiment_data.get("dataset_updated_at"),
-            },
+            dataset_info=dataset_info,
             examples_data=dataset_data,
         )
 
-        # Create evaluation tracer
-        project_name = experiment_data.get("project_name", "")
         eval_tracer, eval_resource = _get_tracer(
             None if dry_run else "evaluators",
             str(self._client.base_url),
@@ -752,6 +878,8 @@ class Experiments:
         )
 
         print("🧠 Evaluation started.")
+        if dry_run:
+            print("🌵️ This is a dry-run evaluation.")
 
         eval_runs = self._run_evaluations(
             task_runs,
@@ -765,13 +893,13 @@ class Experiments:
             dataset,
         )
 
-        # Combine existing evaluation runs with new ones
         all_evaluation_runs = eval_runs
         all_evaluation_runs = experiment["evaluation_runs"] + eval_runs
 
         ran_experiment: RanExperiment = {
             "experiment_id": experiment_id,
             "dataset_id": dataset_id,
+            "dataset_version_id": experiment.get("dataset_version_id"),
             "task_runs": task_runs,
             "evaluation_runs": all_evaluation_runs,
             "experiment_metadata": experiment_metadata,
@@ -1205,13 +1333,11 @@ class AsyncExperiments:
         An `evaluator` is either a synchronous or asynchronous function that returns an evaluation
         result object, which can take any of the following forms:
 
-        - phoenix.experiments.types.EvaluationResult with optional fields for score, label,
-          explanation and metadata
+        - an EvaluationResult dict with optional fields for score, label, explanation and metadata
         - a `bool`, which will be interpreted as a score of 0 or 1 plus a label of "True" or "False"
         - a `float`, which will be interpreted as a score
         - a `str`, which will be interpreted as a label
         - a 2-`tuple` of (`float`, `str`), which will be interpreted as (score, explanation)
-        - a dictionary with any of: "label", "score" and "explanation" keys
 
         If the `evaluator` is a function of one argument then that argument will be
         bound to the `output` of the task. Alternatively, the `evaluator` can be a function of any
@@ -1382,7 +1508,7 @@ class AsyncExperiments:
             for run in all_runs:
                 run["start_time"] = datetime.fromisoformat(run["start_time"])
                 run["end_time"] = datetime.fromisoformat(run["end_time"])
-                async_task_runs.append(run)  # Already in TypedDict format
+                async_task_runs.append(run)
             task_runs = async_task_runs
 
             # Check if we got all expected runs
@@ -1401,6 +1527,7 @@ class AsyncExperiments:
         ran_experiment: RanExperiment = {
             "experiment_id": experiment["id"],
             "dataset_id": dataset.id,
+            "dataset_version_id": dataset.version_id,
             "task_runs": task_runs_list,
             "evaluation_runs": [],
             "experiment_metadata": experiment.get("metadata", {}),
@@ -1428,11 +1555,132 @@ class AsyncExperiments:
 
         return ran_experiment
 
+    async def get_experiment(self, *, experiment_id: str) -> RanExperiment:
+        """
+        Get a completed experiment by ID (async version).
+
+        This method retrieves a completed experiment with all its task runs and evaluation runs,
+        returning a RanExperiment object that can be used with evaluate_experiment to run
+        additional evaluations.
+
+        Args:
+            experiment_id: The ID of the experiment to retrieve.
+
+        Returns:
+            A RanExperiment object containing the experiment data, task runs, and evaluation runs.
+
+        Raises:
+            ValueError: If the experiment is not found.
+            httpx.HTTPStatusError: If the API returns an error response.
+
+        Example:
+            >>> client = AsyncClient()
+            >>> experiment = await client.experiments.get_experiment(experiment_id="123")
+            >>> await client.experiments.evaluate_experiment(
+            ...     experiment=experiment,
+            ...     evaluators=[
+            ...         correctness,
+            ...     ],
+            ...     print_summary=True,
+            ... )
+        """
+        # Get experiment metadata using existing endpoint
+        try:
+            experiment_response = await self._client.get(f"v1/experiments/{experiment_id}")
+            experiment_response.raise_for_status()
+            experiment_data = experiment_response.json()["data"]
+        except HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise ValueError(f"Experiment not found: {experiment_id}")
+            raise
+
+        try:
+            runs_response = await self._client.get(f"v1/experiments/{experiment_id}/runs")
+            runs_response.raise_for_status()
+            runs_data = runs_response.json()["data"]
+        except HTTPStatusError as e:
+            if e.response.status_code == 404:
+                # Experiment exists but has no runs
+                runs_data = []
+            else:
+                raise
+
+        try:
+            json_response = await self._client.get(f"v1/experiments/{experiment_id}/json")
+            json_response.raise_for_status()
+            json_data = json_response.json()
+        except HTTPStatusError as e:
+            if e.response.status_code == 404:
+                # Experiment exists but has no runs
+                json_data = []
+            else:
+                raise
+
+        json_lookup = {}
+        for record in json_data:  # pyright: ignore [reportUnknownVariableType]
+            key = (record["example_id"], record["repetition_number"])  # pyright: ignore [reportUnknownMemberType, reportUnknownVariableType]
+            json_lookup[key] = record
+
+        task_runs: list[ExperimentRun] = []
+        evaluation_runs: list[ExperimentEvaluationRun] = []
+
+        for run_data in runs_data:  # pyright: ignore [reportUnknownVariableType]
+            task_run: ExperimentRun = cast(ExperimentRun, run_data)  # pyright: ignore [reportUnknownArgumentType]
+            task_runs.append(task_run)
+
+            lookup_key = (run_data["dataset_example_id"], run_data["repetition_number"])  # pyright: ignore [reportUnknownMemberType, reportUnknownVariableType]
+            json_record = json_lookup.get(lookup_key)  # pyright: ignore [reportUnknownVariableType, reportUnknownMemberType]
+            if not json_record:
+                continue
+
+            # Create evaluation runs from annotations if present
+            for annotation in json_record.get("annotations", []):  # pyright: ignore [reportUnknownMemberType, reportUnknownVariableType]
+                eval_result = None
+                if (
+                    annotation.get("label") is not None  # pyright: ignore [reportUnknownMemberType]
+                    or annotation.get("score") is not None  # pyright: ignore [reportUnknownMemberType]
+                    or annotation.get("explanation") is not None  # pyright: ignore [reportUnknownMemberType]
+                ):
+                    eval_result = cast(
+                        EvaluationResult,
+                        {  # pyright: ignore [reportUnknownVariableType]
+                            "label": annotation.get("label"),  # pyright: ignore [reportUnknownMemberType]
+                            "score": annotation.get("score"),  # pyright: ignore [reportUnknownMemberType]
+                            "explanation": annotation.get("explanation"),  # pyright: ignore [reportUnknownMemberType]
+                        },
+                    )
+
+                if eval_result is not None:
+                    eval_run = ExperimentEvaluationRun(
+                        id=f"ExperimentEvaluation:{len(evaluation_runs) + 1}",  # Generate temp ID
+                        experiment_run_id=run_data["id"],  # pyright: ignore [reportUnknownArgumentType]
+                        start_time=datetime.fromisoformat(annotation["start_time"]),  # pyright: ignore [reportUnknownArgumentType]
+                        end_time=datetime.fromisoformat(annotation["end_time"]),  # pyright: ignore [reportUnknownArgumentType]
+                        name=annotation["name"],  # pyright: ignore [reportUnknownArgumentType]
+                        annotator_kind=annotation["annotator_kind"],  # pyright: ignore [reportUnknownArgumentType]
+                        error=annotation.get("error"),  # pyright: ignore [reportUnknownMemberType, reportUnknownArgumentType]
+                        result=eval_result,  # pyright: ignore [reportArgumentType]
+                        trace_id=annotation.get("trace_id"),  # pyright: ignore [reportUnknownMemberType, reportUnknownArgumentType]
+                        metadata=annotation.get("metadata", {}),  # pyright: ignore [reportUnknownMemberType, reportUnknownArgumentType]
+                    )
+                    evaluation_runs.append(eval_run)
+
+        ran_experiment: RanExperiment = {
+            "experiment_id": experiment_id,
+            "dataset_id": experiment_data["dataset_id"],
+            "dataset_version_id": experiment_data.get("dataset_version_id"),
+            "task_runs": task_runs,
+            "evaluation_runs": evaluation_runs,
+            "experiment_metadata": experiment_data.get("metadata", {}),
+        }
+
+        return ran_experiment
+
     async def evaluate_experiment(
         self,
         *,
         experiment: RanExperiment,
-        evaluators: Evaluators,
+        evaluators: ExperimentEvaluators,
         dry_run: bool = False,
         print_summary: bool = True,
         timeout: Optional[int] = DEFAULT_TIMEOUT_IN_SECONDS,
@@ -1440,21 +1688,19 @@ class AsyncExperiments:
         rate_limit_errors: Optional[RateLimitErrors] = None,
     ) -> RanExperiment:
         """
-        Run evaluators on a completed experiment (async version).
+        Run evaluators on a completed experiment.
 
-        An `evaluator` is either a synchronous function that returns an evaluation
+        An `evaluator` is either a synchronous or asynchronous function that returns an evaluation
         result object, which can take any of the following forms:
 
-        - phoenix.experiments.types.EvaluationResult with optional fields for score, label,
-          explanation and metadata
+        - an EvaluationResult dict with optional fields for score, label, explanation and metadata
         - a `bool`, which will be interpreted as a score of 0 or 1 plus a label of "True" or "False"
         - a `float`, which will be interpreted as a score
         - a `str`, which will be interpreted as a label
         - a 2-`tuple` of (`float`, `str`), which will be interpreted as (score, explanation)
-        - a dictionary with any of: "label", "score" and "explanation" keys
 
         Args:
-            experiment: The experiment ID or RanExperiment object to evaluate.
+            experiment: The experiment to evaluate, returned from `run_experiment`.
             evaluators: A single evaluator or sequence of evaluators used to
                 evaluate the results of the experiment.
             dry_run: Run the evaluation in dry-run mode. When set, evaluation results will
@@ -1477,47 +1723,57 @@ class AsyncExperiments:
         experiment_id = experiment["experiment_id"]
         task_runs = experiment["task_runs"]
         dataset_id = experiment["dataset_id"]
+        dataset_version_id = experiment.get("dataset_version_id")
         experiment_metadata = experiment["experiment_metadata"]
-        try:
-            experiment_response = await self._client.get(
-                f"v1/experiments/{experiment_id}", timeout=timeout
-            )
-            experiment_response.raise_for_status()
-            experiment_data = experiment_response.json()["data"]
-            dataset_version_id = experiment_data["dataset_version_id"]
-        except HTTPStatusError as e:
-            if e.response.status_code == 404:
-                raise ValueError(f"Experiment not found: {experiment_id}")
-            raise
 
-        # Fetch dataset for evaluation context
+        if experiment_id == DRY_RUN:
+            dry_run = True
+
+        if dry_run:
+            project_name = ""
+        else:
+            try:
+                experiment_response = await self._client.get(
+                    f"v1/experiments/{experiment_id}", timeout=timeout
+                )
+                experiment_response.raise_for_status()
+                experiment_data = experiment_response.json()["data"]
+                project_name = experiment_data.get("project_name", "")
+            except HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    raise ValueError(f"Experiment not found: {experiment_id}")
+                raise
+
+        version_params = (
+            {"version_id": str(dataset_version_id)} if dataset_version_id is not None else {}
+        )
+
         try:
-            dataset_response = await self._client.get(
-                f"v1/datasets/{dataset_id}/examples",
-                params={"version_id": str(dataset_version_id)},
+            dataset_info_response = await self._client.get(
+                f"v1/datasets/{dataset_id}",
+                params=version_params,
                 timeout=timeout,
             )
-            dataset_response.raise_for_status()
-            dataset_data = dataset_response.json()["data"]
+            dataset_info_response.raise_for_status()
+            dataset_info = dataset_info_response.json()["data"]
+
+            dataset_examples_response = await self._client.get(
+                f"v1/datasets/{dataset_id}/examples",
+                params=version_params,
+                timeout=timeout,
+            )
+            dataset_examples_response.raise_for_status()
+            dataset_data = dataset_examples_response.json()["data"]
         except HTTPStatusError:
             raise ValueError(f"Failed to fetch dataset for experiment: {experiment_id}")
 
         from phoenix.client.resources.datasets import Dataset
 
         dataset = Dataset(
-            dataset_info={
-                "id": dataset_id,
-                "name": experiment_data.get("dataset_name", ""),
-                "description": experiment_data.get("dataset_description"),
-                "metadata": experiment_data.get("dataset_metadata", {}),
-                "created_at": experiment_data.get("dataset_created_at"),
-                "updated_at": experiment_data.get("dataset_updated_at"),
-            },
+            dataset_info=dataset_info,
             examples_data=dataset_data,
         )
 
-        # Create evaluation tracer
-        project_name = experiment_data.get("project_name", "")
         eval_tracer, eval_resource = _get_tracer(
             None if dry_run else "evaluators",
             str(self._client.base_url),
@@ -1525,8 +1781,10 @@ class AsyncExperiments:
         )
 
         print("🧠 Evaluation started.")
+        if dry_run:
+            print("🌵️ This is a dry-run evaluation.")
 
-        eval_runs = await self._run_evaluations_async(
+        eval_runs = await self._run_evaluations(
             task_runs,
             evaluators_by_name,
             eval_tracer,
@@ -1539,13 +1797,13 @@ class AsyncExperiments:
             dataset,
         )
 
-        # Combine existing evaluation runs with new ones
         all_evaluation_runs = eval_runs
         all_evaluation_runs = experiment["evaluation_runs"] + eval_runs
 
         ran_experiment: RanExperiment = {
             "experiment_id": experiment_id,
             "dataset_id": dataset_id,
+            "dataset_version_id": experiment.get("dataset_version_id"),
             "task_runs": task_runs,
             "evaluation_runs": all_evaluation_runs,
             "experiment_metadata": experiment_metadata,
@@ -1691,7 +1949,7 @@ class AsyncExperiments:
 
         return exp_run
 
-    async def _run_evaluations_async(
+    async def _run_evaluations(
         self,
         task_runs: list[ExperimentRun],
         evaluators_by_name: Mapping[EvaluatorName, Evaluator],
