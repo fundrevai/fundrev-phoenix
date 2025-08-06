@@ -1,5 +1,11 @@
 # @arizeai/phoenix-client
 
+## 3.0.0
+
+### Major Changes
+
+- 3e80a50: delete span method
+
 ## 2.4.0
 
 ### Minor Changes
